@@ -1,0 +1,98 @@
+name: Deploy
+on:
+  push:
+    branches:
+    - "**"  # run for branches
+    tags:
+    - "*"  # run for tags
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      KBST_DOCKER_ARGS: --rm -v ${{ github.workspace }}:/infra -e AWS_EC2_METADATA_DISABLED=true -e TF_IN_AUTOMATION=true
+      KBST_DOCKER_IMAGE: kbst:${{ github.sha }}
+    steps:
+    - uses: actions/checkout@v2
+
+    #
+    #
+    # Build image
+    - name: Build image
+      env:
+        DOCKER_BUILDKIT: 1
+      run: docker build -t $KBST_DOCKER_IMAGE .
+
+    #
+    #
+    # Terraform init
+    - name: Terraform init
+      env:
+        KBST_AUTH_AWS: ${{ secrets.KBST_AUTH_AWS }}
+        KBST_AUTH_AZ: ${{ secrets.KBST_AUTH_AZ }}
+        KBST_AUTH_GCLOUD: ${{ secrets.KBST_AUTH_GCLOUD }}
+      run: |
+        docker run \
+            $KBST_DOCKER_ARGS \
+            -e KBST_AUTH_AWS \
+            -e KBST_AUTH_AZ \
+            -e KBST_AUTH_GCLOUD \
+            $KBST_DOCKER_IMAGE \
+          terraform init
+
+    #
+    #
+    # Select stage or prod workspace
+    - name: Select stage workspace
+      if: startsWith(github.ref, 'refs/tags/prod-deploy-') == false
+      run: |
+        docker run \
+            $KBST_DOCKER_ARGS \
+            $KBST_DOCKER_IMAGE \
+          terraform workspace select stage
+    - name: Select prod workspace
+      if: startsWith(github.ref, 'refs/tags/prod-deploy-')
+      run: |
+        docker run \
+            $KBST_DOCKER_ARGS \
+            $KBST_DOCKER_IMAGE \
+          terraform workspace select prod
+
+    #
+    #
+    # Terraform plan against current workspace
+    - name: Terraform plan
+      run: |
+        docker run \
+            $KBST_DOCKER_ARGS \
+            $KBST_DOCKER_IMAGE \
+          terraform plan --out=tfplan --input=false
+
+    #
+    #
+    # Terraform apply against current workspace
+    # for main branch or prod-deploy tag
+    - name: Terraform apply
+      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/prod-deploy-')
+      run: |
+        docker run \
+            $KBST_DOCKER_ARGS \
+            $KBST_DOCKER_IMAGE \
+          terraform apply --input=false tfplan
+
+    #
+    #
+    # Terraform plan against prod workspace
+    # after deployign to stage,
+    # run plan against prod
+    - name: Terraform plan
+      if: github.ref == 'refs/heads/main'
+      run: |
+        docker run \
+            $KBST_DOCKER_ARGS \
+            $KBST_DOCKER_IMAGE \
+          terraform workspace select prod
+        docker run \
+            $KBST_DOCKER_ARGS \
+            $KBST_DOCKER_IMAGE \
+          terraform plan --out=tfplan --input=false
